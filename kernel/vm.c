@@ -464,3 +464,27 @@ void vmprint(pagetable_t pagetable)
   printf("page table %p\n", pagetable);
   vmprint_walk(pagetable, 1);
 }
+
+int pgaccessed(pagetable_t pagetable, uint64 start_va, int num)
+{
+  uint64 bitmask = 0;
+
+  num = num > 32 ? 32 : num;
+  start_va = PGROUNDDOWN(start_va);
+
+  for (int i = 0; i < num; i++)
+  {
+    uint64 page_va = start_va + i * PGSIZE;
+    pte_t *pte = walk(pagetable, page_va, 0);
+
+    if (!(PTE_FLAGS(*pte) & PTE_V))
+      continue;
+
+    if (PTE_FLAGS(*pte) & PTE_A)
+    {
+      bitmask |= 1 << i;
+      *pte &= ~PTE_A;
+    }
+  }
+  return bitmask;
+}

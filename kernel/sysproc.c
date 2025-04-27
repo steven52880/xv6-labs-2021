@@ -80,7 +80,17 @@ sys_sleep(void)
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 start_va;
+  int num;
+  uint64 output;
+  argaddr(0, &start_va);
+  argint(1, &num);
+  argaddr(2, &output);
+
+
+  struct proc *p = myproc();
+  int bitmask = pgaccessed(p->pagetable, start_va, num);
+  copyout(p->pagetable, output, (char *) &bitmask, 4);
   return 0;
 }
 #endif
