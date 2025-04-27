@@ -432,3 +432,35 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+void vmprint_walk(pagetable_t pagetable, int depth)
+{
+  // sv39 RISC-V has a 3 layer page table.
+  // Layer 4 means actural physical page address.
+  if (depth == 4)
+  {
+    return;
+  }
+
+  for (int i = 0; i < 512; i++)
+  {
+    pte_t pte = pagetable[i];
+    if (PTE_FLAGS(pte) & PTE_V)
+    {
+      pagetable_t pa = (pagetable_t)PTE2PA(pte);
+
+      // Pretty print info
+      for (int dots = 0; dots < depth;dots++)
+        printf(" ..");
+      printf("%d: pte %p pa %p\n", i, pte, pa);
+
+      vmprint_walk(pa, depth + 1);
+    }
+  }
+}
+
+void vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprint_walk(pagetable, 1);
+}
