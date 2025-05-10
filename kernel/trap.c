@@ -76,6 +76,24 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
+  // Count the ticks for process alarm
+  if (which_dev == 2)
+  {
+    // If the process enabled alarming
+    if (p->alarm.ticks > 0)
+    {
+      p->alarm.count++;
+      if (p->alarm.count > p->alarm.ticks)
+      {
+        p->alarm.count = 0;
+        // Save the context
+        p->alarm.context = *p->trapframe;
+        // Need to return to `handle` function
+        p->trapframe->epc = (uint64)p->alarm.handler;
+      }
+    }
+  }
+
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
