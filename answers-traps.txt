@@ -1,0 +1,38 @@
+**Which registers contain arguments to functions? For example, which register holds 13 in main's call to printf?**
+
+- Arguments: `a0`~`a7`, stack frame if function has more than 8 argumets
+- Return value: `a0`~`a1`
+
+
+
+**Where is the call to function `f` in the assembly code for main? Where is the call to `g`? (Hint: the compiler may inline functions.)**
+
+```
+  printf("%d %d\n", f(8)+1, 13);
+  24:	4635                	li	a2,13
+  26:	45b1                	li	a1,12
+```
+
+The calling to function `g()` is optimized out.
+
+**At what address is the function `printf` located?**
+
+**What value is in the register `ra` just after the `jalr` to `printf` in `main`?**
+
+```
+  30:	00000097          	auipc	ra,0x0
+  34:	600080e7          	jalr	1536(ra) # 630 <printf>
+```
+
+1. `ra = pc + (0x0 << 12)`
+2. jump to `ra + 1536` (`0x0000 0630`)
+
+**Run the following code.** 
+
+```
+$ call
+HE110 World
+```
+
+- `57616` = `0xE110` -> (SmallAddr)`0x10`|`0xE1`|`0x00`|`0x00`(BigAddr)
+- `0x00646c72` -> (SmallAddr)`0x72`|`0x6c`|`0x64`|`0x00`(BigAddr) -> `rld\0`
