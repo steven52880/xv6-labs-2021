@@ -1,0 +1,24 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "start-qemu-gdb",
+            "type": "shell",
+            "command": "make qemu-gdb",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "externel",
+                "fileLocation": "absolute", // 使用一个虚拟的路径
+                "pattern": {
+                    "regexp": "\\*\\*\\* Now run 'gdb' in another window\\.",
+                    "message": "QEMU GDB Server is ready"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": ".*", // 启动即为开始
+                    "endsPattern": "\\*\\*\\* Now run 'gdb' in another window\\." // 这个是你给出的提示语
+                }
+            }
+        }
+    ]
+}
