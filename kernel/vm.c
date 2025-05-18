@@ -17,6 +17,7 @@ extern char trampoline[]; // trampoline.S
 
 char page_refrence_count[PHYPGCNT]; // The physical page has been referenced in how many user process
 
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -56,6 +57,8 @@ void
 kvminit(void)
 {
   kernel_pagetable = kvmmake();
+
+  memset(page_refrence_count, 0, sizeof(page_refrence_count));
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -181,10 +184,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
 
-    uint64 pa = PTE2PA(*pte);
-    page_refrence_count[GETPGCNT(pa)]--;
-
     if(do_free){
+      uint64 pa = PTE2PA(*pte);
+      if (page_refrence_count[GETPGCNT(pa)] > 0)
+        page_refrence_count[GETPGCNT(pa)]--;
+
       if (page_refrence_count[GETPGCNT(pa)] == 0)
       {
         kfree((void *)pa);
@@ -219,7 +223,7 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
     panic("inituvm: more than a page");
   mem = kalloc();
   memset(mem, 0, PGSIZE);
-  page_refrence_count[GETPGCNT((uint64)mem)]++;
+  page_refrence_count[GETPGCNT((uint64)mem)] = 1;
   mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
   memmove(mem, src, sz);
 }
@@ -243,7 +247,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
       return 0;
     }
     memset(mem, 0, PGSIZE);
-    page_refrence_count[GETPGCNT((uint64)mem)]++;
+    page_refrence_count[GETPGCNT((uint64)mem)] = 1;
     if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
       kfree(mem);
       uvmdealloc(pagetable, a, oldsz);
@@ -326,6 +330,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     flags &= ~PTE_W;
     flags |= PTE_COW;
 
+    // page_refrence_count[GETPGCNT(pa)]++;
     page_refrence_count[GETPGCNT(pa)]++;
     if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
@@ -350,18 +355,21 @@ uvmcow(pagetable_t pagetable, uint64 va)
   pte_t *pte = walk(pagetable, va, 0);
   if (pte == 0)
     panic("uvmcow: page not found");
-  if ((*pte & PTE_COW) == 0)
-    return -1;
   if ((*pte & PTE_W) != 0)
+    return 0;
+  if ((*pte & PTE_COW) == 0)
     return -1;
 
   // printf("\n\nCOW: %p\n", va);
   // vmprint(pagetable);
 
   uint64 pa = PTE2PA(*pte);
-  uint64 flags = PTE_FLAGS(*pte);
-  flags &= ~PTE_COW;
-  flags |= PTE_W;
+  if (page_refrence_count[GETPGCNT(pa)] == 1)
+  {
+    *pte |= PTE_W;
+    *pte &= ~PTE_COW;
+    return 0;
+  }
 
   void *mem;
   if ((mem = kalloc()) == 0)
@@ -369,10 +377,13 @@ uvmcow(pagetable_t pagetable, uint64 va)
     return -1;
   }
 
-  page_refrence_count[GETPGCNT((uint64)pa)]--;
-  uvmunmap(pagetable, va, 1, 0);
+  uint64 flags = PTE_FLAGS(*pte);
+  flags &= ~PTE_COW;
+  flags |= PTE_W;
 
-  page_refrence_count[GETPGCNT((uint64)mem)]++;
+  uvmunmap(pagetable, va, 1, 1);
+
+  page_refrence_count[GETPGCNT((uint64)mem)] = 1;
   mappages(pagetable, va, 1, (uint64)mem, flags);
 
   memmove(mem, (void *)pa, PGSIZE);
@@ -408,7 +419,11 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
-    uvmcow(pagetable, dstva);
+    if (uvmcow(pagetable, va0) != 0)
+    {
+      printf("copyout cow err");
+      return -1;
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -529,8 +544,18 @@ void vmprint_walk(pagetable_t pagetable, int depth)
   }
 }
 
+int countfree();
+
 void vmprint(pagetable_t pagetable)
 {
-  printf("page table %p\n", pagetable);
-  vmprint_walk(pagetable, 1);
+  // printf("page table %p\n", pagetable);
+  // vmprint_walk(pagetable, 1);
+  // printf("\nref: \n");
+  // for (int i = 0; i < PHYPGCNT; i++)
+  // {
+  //   // if (page_refrence_count[i] != 0)
+  //     printf("%x ", page_refrence_count[i]);
+  // }
+  // printf("\n");
+  // printf("free: %d\n", countfree());
 }

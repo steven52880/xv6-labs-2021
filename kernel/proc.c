@@ -665,7 +665,8 @@ void cow(uint64 va)
     goto fail;
 
   return;
-
 fail:
+  printf("failed");
+  vmprint(p->pagetable);
   kill(p->pid);
 }
