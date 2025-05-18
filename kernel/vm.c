@@ -416,14 +416,14 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
     if (uvmcow(pagetable, va0) != 0)
     {
       printf("copyout cow err");
       return -1;
     }
+    pa0 = walkaddr(pagetable, va0);
+    if(pa0 == 0)
+      return -1;
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -548,8 +548,8 @@ int countfree();
 
 void vmprint(pagetable_t pagetable)
 {
-  // printf("page table %p\n", pagetable);
-  // vmprint_walk(pagetable, 1);
+  printf("page table %p\n", pagetable);
+  vmprint_walk(pagetable, 1);
   // printf("\nref: \n");
   // for (int i = 0; i < PHYPGCNT; i++)
   // {
