@@ -350,11 +350,12 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 int
 uvmcow(pagetable_t pagetable, uint64 va)
 {
-
+  if (va >= MAXVA)
+    return -1;
   va = PGROUNDDOWN(va);
   pte_t *pte = walk(pagetable, va, 0);
   if (pte == 0)
-    panic("uvmcow: page not found");
+    return -1;
   if ((*pte & PTE_W) != 0)
     return 0;
   if ((*pte & PTE_COW) == 0)
@@ -418,7 +419,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     va0 = PGROUNDDOWN(dstva);
     if (uvmcow(pagetable, va0) != 0)
     {
-      printf("copyout cow err");
+      // printf("copyout cow err");
       return -1;
     }
     pa0 = walkaddr(pagetable, va0);
@@ -544,18 +545,15 @@ void vmprint_walk(pagetable_t pagetable, int depth)
   }
 }
 
-int countfree();
-
 void vmprint(pagetable_t pagetable)
 {
   printf("page table %p\n", pagetable);
   vmprint_walk(pagetable, 1);
+
   // printf("\nref: \n");
   // for (int i = 0; i < PHYPGCNT; i++)
   // {
   //   // if (page_refrence_count[i] != 0)
   //     printf("%x ", page_refrence_count[i]);
   // }
-  // printf("\n");
-  // printf("free: %d\n", countfree());
 }

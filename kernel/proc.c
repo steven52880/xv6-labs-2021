@@ -659,14 +659,11 @@ void cow(uint64 va)
 {
   struct proc *p = myproc();
 
-  if (va >= MAXVA)
-    goto fail;
   if (uvmcow(p->pagetable, va) != 0)
     goto fail;
 
   return;
 fail:
   printf("failed");
-  vmprint(p->pagetable);
   kill(p->pid);
 }
