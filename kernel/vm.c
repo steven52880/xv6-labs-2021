@@ -15,6 +15,8 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+char page_refrence_count[PHYPGCNT]; // The physical page has been referenced in how many user process
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -178,9 +180,15 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
+
+    uint64 pa = PTE2PA(*pte);
+    page_refrence_count[GETPGCNT(pa)]--;
+
     if(do_free){
-      uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+      if (page_refrence_count[GETPGCNT(pa)] == 0)
+      {
+        kfree((void *)pa);
+      }
     }
     *pte = 0;
   }
@@ -211,6 +219,7 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
     panic("inituvm: more than a page");
   mem = kalloc();
   memset(mem, 0, PGSIZE);
+  page_refrence_count[GETPGCNT((uint64)mem)]++;
   mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
   memmove(mem, src, sz);
 }
@@ -234,6 +243,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
       return 0;
     }
     memset(mem, 0, PGSIZE);
+    page_refrence_count[GETPGCNT((uint64)mem)]++;
     if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
       kfree(mem);
       uvmdealloc(pagetable, a, oldsz);
@@ -303,7 +313,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -312,19 +321,65 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    // COW: Cause a pagefault when new process write on the existing page
+    flags &= ~PTE_W;
+    flags |= PTE_COW;
+
+    page_refrence_count[GETPGCNT(pa)]++;
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+
+    // COW: Not writable for old process to
+    *pte &= ~PTE_W;
+    *pte |= PTE_COW;
   }
   return 0;
 
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
+}
+
+int
+uvmcow(pagetable_t pagetable, uint64 va)
+{
+
+  va = PGROUNDDOWN(va);
+  pte_t *pte = walk(pagetable, va, 0);
+  if (pte == 0)
+    panic("uvmcow: page not found");
+  if ((*pte & PTE_COW) == 0)
+    return -1;
+  if ((*pte & PTE_W) != 0)
+    return -1;
+
+  // printf("\n\nCOW: %p\n", va);
+  // vmprint(pagetable);
+
+  uint64 pa = PTE2PA(*pte);
+  uint64 flags = PTE_FLAGS(*pte);
+  flags &= ~PTE_COW;
+  flags |= PTE_W;
+
+  void *mem;
+  if ((mem = kalloc()) == 0)
+  {
+    return -1;
+  }
+
+  page_refrence_count[GETPGCNT((uint64)pa)]--;
+  uvmunmap(pagetable, va, 1, 0);
+
+  page_refrence_count[GETPGCNT((uint64)mem)]++;
+  mappages(pagetable, va, 1, (uint64)mem, flags);
+
+  memmove(mem, (void *)pa, PGSIZE);
+
+  // printf("COW After: %p\n", va);
+  // vmprint(pagetable);
+  return 0;
 }
 
 // mark a PTE invalid for user access.
@@ -353,6 +408,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+    uvmcow(pagetable, dstva);
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -452,7 +508,21 @@ void vmprint_walk(pagetable_t pagetable, int depth)
       // Pretty print info
       for (int dots = 0; dots < depth;dots++)
         printf(" ..");
-      printf("%d: pte %p pa %p\n", i, pte, pa);
+      char bits[] = "      ";
+      if (pte & PTE_U)
+        bits[0] = 'U';
+      if (pte & PTE_X)
+        bits[1] = 'X';
+      if (pte & PTE_W)
+        bits[2] = 'W';
+      if (pte & PTE_R)
+        bits[3] = 'R';
+      if (pte & PTE_V)
+        bits[4] = 'V';
+      if (pte & PTE_COW)
+        bits[5] = '@';
+
+      printf("%d: pa %p %s\n", i, pa, bits);
 
       vmprint_walk(pa, depth + 1);
     }
