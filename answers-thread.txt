@@ -1,0 +1,2 @@
+Because multiple put thread may access the same hash bucket in the same time, with some read-and-write options. 
+The invariant of the linked list is that `table[i]` must points to the first entry. But inside `insert()`, before `*p = e`, `table[i]` points to the second entry.
