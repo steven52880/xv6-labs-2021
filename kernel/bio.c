@@ -23,15 +23,8 @@
 #include "fs.h"
 #include "buf.h"
 
-struct {
-  struct spinlock lock;
-  struct buf buf[NBUF];
-
-  // Linked list of all free buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
-} bcache;
+struct buf buf[NBUF];
+struct bcache bcache[NCPU];
 
 #define MODNUM 19
 struct hashmap{
@@ -88,7 +81,8 @@ void binit(void)
 {
   struct buf *b;
 
-  initlock(&bcache.lock, "bcache");
+  for (int i = 0; i < NCPU; i++)
+    initlock(&bcache[i].lock, "bcache");
   for (int i = 0; i < MODNUM; i++)
   {
     initlock(&bhashmap[i].lock, "bcache.hashlock");
@@ -96,17 +90,23 @@ void binit(void)
   }
 
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  int i = 0;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+  for (int i = 0; i < NCPU; i++)
+  {
+    bcache[i].head.prev = &bcache[i].head;
+    bcache[i].head.next = &bcache[i].head;
+  }
+  int id = 0;
+  for(b = buf; b < buf+NBUF; b++){
+    b->next = bcache[id % NCPU].head.next;
+    b->prev = &bcache[id % NCPU].head;
+    bcache[id % NCPU].head.next->prev = b;
+    bcache[id % NCPU].head.next = b;
 
-    b->blockno = i++;
+    b->bcache = &bcache[id % NCPU];
+
+    initsleeplock(&b->lock, "buffer");
+
+    b->blockno = id++;
     bhashadd(bhashgetline(b->blockno), b);
   }
 }
@@ -128,12 +128,12 @@ bget(uint dev, uint blockno)
   {
     if (b->refcnt == 0)
     {
-      acquire(&bcache.lock);
+      acquire(&b->bcache->lock);
       b->prev->next = b->next;
       b->next->prev = b->prev;
       // b->prev = 0;
       // b->next = 0;
-      release(&bcache.lock);  
+      release(&b->bcache->lock);
     }
     b->refcnt++;
     release(&h->lock);
@@ -149,9 +149,19 @@ bget(uint dev, uint blockno)
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
 
-  while ((b = bcache.head.prev) != &bcache.head)
+  int cpu = cpuid();
+
+  while (1)
   {
     //release(&bcache.lock);
+    b = bcache[cpu].head.prev;
+    if (b == &bcache[cpu].head)
+    {
+      cpu = (cpu + 1) % NCPU;
+      if (cpu == cpuid())
+        break;
+      continue;
+    }
 
     struct hashmap *oh;
     oh = bhashgetline(b->blockno);
@@ -172,12 +182,12 @@ bget(uint dev, uint blockno)
     // b is free to use
 
     // Remove from free buf list
-    acquire(&bcache.lock);
+    acquire(&b->bcache->lock);
     b->next->prev = b->prev;
     b->prev->next = b->next;
     // b->next = 0;
     // b->prev = 0;
-    release(&bcache.lock);
+    release(&b->bcache->lock);
 
     // Remove from hashmap
     bhashdel(oh, b);
@@ -241,12 +251,14 @@ brelse(struct buf *b)
   if (b->refcnt == 0) {
     // no one is waiting for it.
     // insert it into the HEAD of the free buffer list
-    acquire(&bcache.lock);
-    bcache.head.next->prev = b;
-    b->next = bcache.head.next;
-    bcache.head.next = b;
-    b->prev = &bcache.head;
-    release(&bcache.lock);
+    int cpu = cpuid();
+    acquire(&bcache[cpu].lock);
+    bcache[cpu].head.next->prev = b;
+    b->next = bcache[cpu].head.next;
+    bcache[cpu].head.next = b;
+    b->prev = &bcache[cpu].head;
+    b->bcache = &bcache[cpu];
+    release(&bcache[cpu].lock);
   }
   release(&h->lock);
 }
