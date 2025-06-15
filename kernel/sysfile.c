@@ -304,16 +304,41 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
-    }
-    ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
+    int rec_cnt = 0;
+    while (1)
+    {
+      ip = namei(path);
+      if (ip == 0)
+      {
+        end_op();
+        return -1;
+      }
+
+      ilock(ip);
+      if (ip->type != T_SYMLINK)
+        break;
+
+      // Don't follow the symlink with O_NOFOLLOW flag
+      if (omode & O_NOFOLLOW)
+        break;
+
+      // Follow the symlink
+      readi(ip, 0, (uint64)path, 0, MAXPATH);
       iunlockput(ip);
-      end_op();
-      return -1;
+
+      rec_cnt++;
+      if (rec_cnt > 10)
+      {
+        end_op();
+        return -1;
+      }
     }
+  }
+
+  if(ip->type == T_DIR && omode != O_RDONLY){
+    iunlockput(ip);
+    end_op();
+    return -1;
   }
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
@@ -482,5 +507,33 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH];
+  char path[MAXPATH];
+
+  if (argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+
+  struct inode *i;
+  i = create(path, T_SYMLINK, 0, 0);
+  if (i == 0)
+  {
+    end_op();
+    return -1;
+  }
+
+  // Write the path to the inode
+  writei(i, 0, (uint64)target, 0, strlen(target));
+
+  iunlockput(i);
+
+  end_op();
   return 0;
 }
