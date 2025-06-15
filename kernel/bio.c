@@ -24,31 +24,71 @@
 #include "buf.h"
 
 struct {
-  struct spinlock lock;
+  struct spinlock lock_del;
   struct buf buf[NBUF];
-
-  // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
 } bcache;
+
+#define MODNUM 19
+struct hashmap
+{
+  struct spinlock lock;
+  struct spinlock lock_add;
+  struct buf list;
+} bhashmap[MODNUM];
+
+struct hashmap *bhashgetline(uint blockno)
+{
+  return &bhashmap[blockno % MODNUM];
+}
+
+void bhashadd(struct hashmap *h, struct buf *buf)
+{
+  buf->next = h->list.next;
+  buf->prev = &h->list;
+  h->list.next->prev = buf;
+  h->list.next = buf;
+}
+
+struct buf *bhashget(struct hashmap *h, uint dev, uint blockno)
+{
+  struct buf *b = h->list.next;
+
+  for (; b != &h->list; b = b->next)
+  {
+    if (b->dev == dev && b->blockno == blockno)
+      return b;
+  }
+  return 0;
+}
+
+void bhashdel(struct hashmap *h, struct buf *buf)
+{
+  buf->next->prev = buf->prev;
+  buf->prev->next = buf->next;
+  buf->prev = 0;
+  buf->next = 0;
+}
 
 void
 binit(void)
 {
   struct buf *b;
 
-  initlock(&bcache.lock, "bcache");
+  initlock(&bcache.lock_del, "bcache.lock_del");
+
+  for (int i = 0; i < MODNUM; i++)
+  {
+    struct hashmap *h = &bhashmap[i];
+    initlock(&h->lock, "bcache.hashlock");
+    initlock(&h->lock_add, "bcache.hashlockadd");
+    h->list.prev = &h->list;
+    h->list.next = &h->list;
+  }
 
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    bhashadd(&bhashmap[0], b);
   }
 }
 
@@ -60,31 +100,92 @@ bget(uint dev, uint blockno)
 {
   struct buf *b;
 
-  acquire(&bcache.lock);
-
+  struct hashmap *h = bhashgetline(blockno);
+  acquire(&h->lock_add);
+  acquire(&h->lock);
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
-    if(b->dev == dev && b->blockno == blockno){
-      b->refcnt++;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  b = bhashget(h, dev, blockno);
+  if (b)
+  {
+    b->refcnt++;
+    release(&h->lock);
+    release(&h->lock_add);
+    acquiresleep(&b->lock);
+    return b;
+  }
+  release(&h->lock);
+
+  acquire(&bcache.lock_del);
+  while (1)
+  {
+    struct buf *lru_b = 0;
+    uint lru_time = 0xFFFFFFFF;
+
+    // Walk through hashmap buckets
+    for (int i = 0; i < MODNUM; i++)
+    {
+      struct hashmap *h = &bhashmap[i];
+      acquire(&h->lock);
+
+      // Walk through link list in one bucket
+      struct buf *b = h->list.next;
+      while (b != &h->list)
+      {
+        // Check timestamp
+        if (b->refcnt == 0 && b->timestamp < lru_time)
+        {
+          lru_time = b->timestamp;
+          lru_b = b;
+        }
+        b = b->next;
+      }
+
+      release(&h->lock);
     }
+    
+    // No free buf found
+    if (lru_b == 0)
+      break;
+
+    // We use bcache.lock_del, so lru_b will definitely in its bucket
+    struct hashmap *lru_h = bhashgetline(lru_b->blockno);
+    acquire(&lru_h->lock);
+
+    // Retry if the selected buf has been used again
+    if (lru_b->refcnt != 0 || lru_b->timestamp != lru_time)
+    {
+      release(&lru_h->lock);
+      continue;
+    }
+
+    // Remove lru_b from bucket
+    bhashdel(lru_h, lru_b);
+    release(&lru_h->lock);
+
+    // Allow other cpu to walk through hashmap
+    release(&bcache.lock_del);
+
+    b = lru_b;
+
+    // Fill info
+    b->dev = dev;
+    b->blockno = blockno;
+    b->valid = 0;
+    b->refcnt = 1;
+
+    // Insert into new hash bucket
+    acquire(&h->lock);
+    bhashadd(h, b);
+    release(&h->lock);
+
+    // Allow other cpu to use bget in the bucket
+    release(&h->lock_add);
+
+    // return
+    acquiresleep(&b->lock);
+    return b;
   }
 
-  // Not cached.
-  // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
-      b->dev = dev;
-      b->blockno = blockno;
-      b->valid = 0;
-      b->refcnt = 1;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
-    }
-  }
   panic("bget: no buffers");
 }
 
@@ -120,34 +221,25 @@ brelse(struct buf *b)
     panic("brelse");
 
   releasesleep(&b->lock);
-
-  acquire(&bcache.lock);
+ 
+  struct hashmap *h = bhashgetline(b->blockno);
+  acquire(&h->lock);
   b->refcnt--;
-  if (b->refcnt == 0) {
-    // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
-  }
-  
-  release(&bcache.lock);
+  release(&h->lock);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  acquire(&bhashgetline(b->blockno)->lock);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bhashgetline(b->blockno)->lock);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  acquire(&bhashgetline(b->blockno)->lock);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bhashgetline(b->blockno)->lock);
 }
 
 
