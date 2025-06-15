@@ -221,10 +221,15 @@ brelse(struct buf *b)
     panic("brelse");
 
   releasesleep(&b->lock);
- 
+
+  acquire(&tickslock);
+  uint timestamp = ticks;
+  release(&tickslock);
+
   struct hashmap *h = bhashgetline(b->blockno);
   acquire(&h->lock);
   b->refcnt--;
+  b->timestamp = timestamp;
   release(&h->lock);
 }
 
