@@ -80,6 +80,18 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
+struct vma {
+  // addr ~ addr+length => file+offset ~ file+offset+length
+  struct file *file;
+  uint64 addr;
+  int offset;
+  int length;
+
+  int prot;  // RWX permission
+  int flags; // write back or not
+};
+#define VMA_AREA_CNT 16
+
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
@@ -105,4 +117,7 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  struct vma vma[VMA_AREA_CNT];
+  uint64 next_vma_addr;
 };

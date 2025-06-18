@@ -6,6 +6,13 @@
 #include "defs.h"
 #include "fs.h"
 
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "proc.h"
+#include "stat.h"
+#include "fcntl.h"
+
 /*
  * the kernel's page table.
  */
@@ -431,4 +438,189 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+void vmprint(pagetable_t pagetable);
+
+#define max(a, b) (a > b ? a : b)
+#define min(a, b) (a < b ? a : b)
+
+    int pagefault()
+{
+  uint64 addr = r_stval();
+  uint64 scause = r_scause();
+  switch (scause)
+  {
+  case 12:
+    printf("Instruction page fault\n");
+    break;
+  case 13:
+    printf("Load page fault\n");
+    break;
+  case 15:
+    printf("Store page fault\n");
+    break;
+  default:
+    break;
+  }
+  printf("addr: %p\n", addr);
+
+  struct proc *p = myproc();
+
+  addr = PGROUNDDOWN(addr);
+
+  // Check if addr falls into any vma
+  struct vma *vma = 0;
+  for (int i = 0; i < VMA_AREA_CNT; i++)
+  {
+    if (p->vma[i].length == 0)
+      continue;
+    if (p->vma[i].addr <= addr && addr < p->vma[i].addr + p->vma[i].length)
+    {
+      vma = &p->vma[i];
+      break;
+    }
+  }
+
+  // Not a mapped page
+  if (!vma)
+  {
+    printf("pagefault: not a mapped page\n");
+    return -1;
+  }
+
+  // Is a mapped page
+  pte_t *pte = walk(p->pagetable, addr, 0);
+
+  // Has been loaded but still cause pagefault
+  if (pte && PTE_FLAGS(*pte) & PTE_V)
+  {
+    printf("pagefault: has been loaded\n");
+    return -1;
+  }
+
+  uint64 pa = (uint64)kalloc();
+  if (!pa)
+    panic("page fault: no free page");
+  memset((void *)pa, 0, PGSIZE);
+
+  int perm = PTE_U;
+  perm |= vma->prot & PROT_READ ? PTE_R : 0;
+  perm |= vma->prot & PROT_WRITE ? PTE_W : 0;
+  perm |= vma->prot & PROT_EXEC ? PTE_X : 0;
+  if (mappages(p->pagetable, addr, PGSIZE, pa, perm))
+    panic("page fault: mappages");
+
+  vmprint(p->pagetable);
+
+  uint64 offset = addr - vma->addr;
+  int length = min(PGSIZE, vma->addr + vma->length - addr);
+
+  struct inode *ip = vma->file->ip;
+  ilock(ip);
+  readi(ip, 0, pa, offset, length);
+  iunlock(ip);
+
+  return 0;
+}
+
+uint64
+mmap(int length, int prot, int flags, struct file *file)
+{
+  struct proc *p = myproc();
+
+  // Find a free vma struct
+  struct vma *v = 0;
+  for (int i = 0; i < VMA_AREA_CNT; i++)
+  {
+    if (p->vma[i].length == 0)
+    {
+      v = &p->vma[i];
+      break;
+    }
+  }
+
+  if (!v)
+  {
+    panic("mmap: no free vma area");
+  }
+
+  // Add refference to fd
+  filedup(file);
+
+  // min(length, file_stat.size)
+  struct stat file_stat;
+  ilock(file->ip);
+  stati(file->ip, &file_stat);
+  iunlock(file->ip);
+  length = length > file_stat.size ? file_stat.size : length;
+
+  // Set vma info
+  v->file = file;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->offset = 0;
+
+  // Arrange memory space
+  v->addr = p->next_vma_addr;
+  p->next_vma_addr += PGROUNDUP(length);
+
+  // Setup pagetable
+
+  printf("mmap: %p (%d)\n", v->addr, v->length);
+
+  // Done
+  return v->addr;
+}
+
+// unmap at the start, or at the end, or the whole region (but not punch a hole in the middle of a region)
+int munmap(void *addr, int length)
+{
+  return 0;
+}
+
+void vmprint_walk(pagetable_t pagetable, int depth, uint64 va)
+{
+  // sv39 RISC-V has a 3 layer page table.
+  // Layer 4 means actural physical page address.
+  if (depth == 4)
+  {
+    return;
+  }
+
+  for (uint i = 0; i < 512; i++)
+  {
+    pte_t pte = pagetable[i];
+    if (PTE_FLAGS(pte) & PTE_V)
+    {
+      pagetable_t pa = (pagetable_t)PTE2PA(pte);
+
+      // Pretty print info
+      for (int dots = 0; dots < depth; dots++)
+        printf(" ..");
+      char bits[] = "      ";
+      if (pte & PTE_U)
+        bits[0] = 'U';
+      if (pte & PTE_X)
+        bits[1] = 'X';
+      if (pte & PTE_W)
+        bits[2] = 'W';
+      if (pte & PTE_R)
+        bits[3] = 'R';
+      if (pte & PTE_V)
+        bits[4] = 'V';
+
+      uint64 next_va = (i << PXSHIFT(3 - depth)) | va;
+      printf("%d: va %p | pa %p %s\n", i, next_va, pa, bits);
+
+      vmprint_walk(pa, depth + 1, next_va);
+    }
+  }
+}
+
+void vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprint_walk(pagetable, 1, 0);
 }

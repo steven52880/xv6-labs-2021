@@ -141,6 +141,10 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // Set up vma
+  memset(p->vma, 0, sizeof(p->vma));
+  p->next_vma_addr = PHYSTOP;
+
   return p;
 }
 
