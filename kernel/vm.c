@@ -440,30 +440,28 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   }
 }
 
-void vmprint(pagetable_t pagetable);
-
 #define max(a, b) (a > b ? a : b)
 #define min(a, b) (a < b ? a : b)
 
-    int pagefault()
+int pagefault()
 {
   uint64 addr = r_stval();
-  uint64 scause = r_scause();
-  switch (scause)
-  {
-  case 12:
-    printf("Instruction page fault\n");
-    break;
-  case 13:
-    printf("Load page fault\n");
-    break;
-  case 15:
-    printf("Store page fault\n");
-    break;
-  default:
-    break;
-  }
-  printf("addr: %p\n", addr);
+  // uint64 scause = r_scause();
+  // switch (scause)
+  // {
+  // case 12:
+  //   printf("Instruction page fault\n");
+  //   break;
+  // case 13:
+  //   printf("Load page fault\n");
+  //   break;
+  // case 15:
+  //   printf("Store page fault\n");
+  //   break;
+  // default:
+  //   break;
+  // }
+  // printf("addr: %p\n", addr);
 
   struct proc *p = myproc();
 
@@ -502,8 +500,10 @@ void vmprint(pagetable_t pagetable);
   uint64 pa = (uint64)kalloc();
   if (!pa)
     panic("page fault: no free page");
+  // kalloc will not clear the page
   memset((void *)pa, 0, PGSIZE);
 
+  // Don't forget PTE_U
   int perm = PTE_U;
   perm |= vma->prot & PROT_READ ? PTE_R : 0;
   perm |= vma->prot & PROT_WRITE ? PTE_W : 0;
@@ -511,7 +511,7 @@ void vmprint(pagetable_t pagetable);
   if (mappages(p->pagetable, addr, PGSIZE, pa, perm))
     panic("page fault: mappages");
 
-  vmprint(p->pagetable);
+  // vmprint(p->pagetable);
 
   uint64 offset = addr - vma->addr;
   int length = min(PGSIZE, vma->addr + vma->length - addr);
@@ -541,17 +541,7 @@ mmap(int length, int prot, int flags, struct file *file)
   }
 
   if (!v)
-  {
     panic("mmap: no free vma area");
-  }
-
-
-  // min(length, file_stat.size)
-  // struct stat file_stat;
-  // ilock(file->ip);
-  // stati(file->ip, &file_stat);
-  // iunlock(file->ip);
-  // length = length > file_stat.size ? file_stat.size : length;
 
   // Check permission
   if (flags == MAP_SHARED && !file->writable && (prot & PROT_WRITE))
@@ -571,9 +561,7 @@ mmap(int length, int prot, int flags, struct file *file)
   v->addr = p->next_vma_addr;
   p->next_vma_addr += PGROUNDUP(length);
 
-  // Setup pagetable
-
-  printf("mmap: %p (%d)\n", v->addr, v->length);
+  // printf("mmap: %p (%d)\n", v->addr, v->length);
 
   // Done
   return v->addr;
@@ -667,7 +655,6 @@ int munmap(struct proc *p, uint64 addr, int length)
   {
     uint64 size = min(PGROUNDDOWN(va + PGSIZE), unmap_end) - va;
     release_page(p, vma, va, size, 1);
-    
   }
 
   // Postprocess: release file or move the pointers

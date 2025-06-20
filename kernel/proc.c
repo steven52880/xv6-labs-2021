@@ -208,8 +208,6 @@ proc_pagetable(struct proc *p)
 void
 proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
-  printf("freepagetable: ");
-  vmprint(pagetable);
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
@@ -359,11 +357,11 @@ exit(int status)
   if(p == initproc)
     panic("init exiting");
 
+  // Release mapped pages
   for (int i = 0; i < VMA_AREA_CNT; i++)
   {
     if (p->vma[i].length == 0)
       continue;
-
     munmap(p, p->vma[i].addr, p->vma[i].length);
   }
 
