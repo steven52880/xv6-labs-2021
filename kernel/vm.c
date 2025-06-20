@@ -579,6 +579,36 @@ mmap(int length, int prot, int flags, struct file *file)
   return v->addr;
 }
 
+void release_page(struct proc *p, struct vma *vma, uint64 va, uint64 size, int remove)
+{
+  uint64 pa = walkaddr(p->pagetable, va);
+
+  // Not allocated
+  if (size == 0 || !pa)
+    return;
+
+  // Actural pa
+  pa += va - PGROUNDDOWN(va);
+
+  // Write back if needed
+  if (vma->flags & MAP_SHARED)
+  {
+    uint64 fileoff = va - vma->addr + vma->fileoff;
+    begin_op();
+    ilock(vma->file->ip);
+    writei(vma->file->ip, 0, pa, fileoff, size);
+    iunlock(vma->file->ip);
+    end_op();
+  }
+
+  // Clear
+  memset((void *)pa, 0, sizeof(pa));
+
+  // Remove from pagetable
+  if (remove)
+    uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 1);
+}
+
 // unmap at the start, or at the end, or the whole region (but not punch a hole in the middle of a region)
 int munmap(struct proc *p, uint64 addr, int length)
 {
@@ -600,101 +630,66 @@ int munmap(struct proc *p, uint64 addr, int length)
   if (!vma)
     return -1;
 
-  uint64 start_va = max(addr, vma->addr);
-  uint64 end_va = min(addr + length, vma->addr + length);
-  uint64 actual_length = end_va - start_va;
+  uint64 vma_start = vma->addr;
+  uint64 vma_end = vma->addr + vma->length;
+  uint64 unmap_start = addr;
+  uint64 unmap_end = addr + length;
+  uint64 actual_length = unmap_end - unmap_start;
 
-  if (actual_length == vma->length)
-  {
-    // whole region
-    vma->length = 0;
+  // Check for wrong length
+  if (unmap_start < vma_start || unmap_end > vma_end)
+    return -1;
 
-    fileclose(vma->file);
+  // Check for punching a hole
+  if (unmap_start != vma_start && unmap_end != vma_end)
+    return -1;
 
-    start_va = PGROUNDDOWN(start_va);
-    end_va = PGROUNDUP(end_va);
-  }
-  else if (start_va == vma->addr)
+  // Preprocess: deal with the start/end page which should not be remove from pagetable
+  if (unmap_start == vma_start && unmap_end != vma_end)
   {
     // unmap at the start, deal with the reserved area at the end
-    uint64 pa = walkaddr(p->pagetable, end_va);
-    uint64 fileoff = vma->fileoff + (PGROUNDDOWN(end_va) - vma->addr);
-    uint64 size = end_va - PGROUNDDOWN(end_va);
-    if (size != 0 && pa != 0)
-    {
-      if (vma->flags & MAP_SHARED)
-      {
-        begin_op();
-        ilock(vma->file->ip);
-        writei(vma->file->ip, 0, pa, fileoff, size);
-        iunlock(vma->file->ip);
-        end_op();
-      }
-
-      memset((void *)(pa), 0, size);
-    }
-
-    vma->addr = end_va;
-    vma->length -= actual_length;
-    vma->fileoff += actual_length;
-
-    start_va = PGROUNDDOWN(start_va);
-    end_va = PGROUNDDOWN(end_va);
+    uint64 va = max(unmap_start, PGROUNDDOWN(unmap_end));
+    uint64 size = unmap_end - va;
+    release_page(p, vma, va, size, 0);
+    unmap_end = PGROUNDDOWN(unmap_end);
   }
-  else if (end_va == vma->addr + length)
+  else if (unmap_start != vma_start && unmap_end == vma_end)
   {
     // unmap at the end, deal with the reserved area at the start
-    uint64 pa = walkaddr(p->pagetable, start_va);
-    uint64 memoff = start_va - PGROUNDDOWN(start_va);
-    uint64 size = PGSIZE - memoff;
-    if (pa != 0)
-    {
-      if (vma->flags & MAP_SHARED)
-      {
-        begin_op();
-        ilock(vma->file->ip);
-        writei(vma->file->ip, 0, pa + memoff, vma->fileoff, size);
-        iunlock(vma->file->ip);
-        end_op();  
-      }
-      memset((void *)(pa + memoff), 0, size);
-    }
+    uint64 va = unmap_start;
+    uint64 size = min(unmap_end, PGROUNDUP(unmap_start)) - va;
+    release_page(p, vma, va, size, 0);
+    unmap_start = PGROUNDUP(unmap_start);
+  }
 
+  // Write back other page and remove them from pagetable
+  for (uint64 va = unmap_start; va < unmap_end; va = PGROUNDDOWN(va + PGSIZE))
+  {
+    uint64 size = min(PGROUNDDOWN(va + PGSIZE), unmap_end) - va;
+    release_page(p, vma, va, size, 1);
+    
+  }
+
+  // Postprocess: release file or move the pointers
+  if (unmap_start == vma_start && unmap_end == vma_end)
+  {
+    // release the whole mapped area
+    vma->length = 0;
+    fileclose(vma->file);
+  }
+  else if (unmap_start == vma_start && unmap_end != vma_end)
+  {
+    // unmap at the start
+    vma->addr = unmap_end;
     vma->length -= actual_length;
-
-    start_va = PGROUNDUP(start_va);
-    end_va = PGROUNDUP(end_va);
+    vma->fileoff += actual_length;
   }
-  else
+  else if (unmap_start != vma_start && unmap_end == vma_end)
   {
-    // punch a hole
-    panic("munmap: punch hole");
+    // unmap at the end
+    vma->length -= actual_length;
   }
 
-  // free internal pages
-  for (uint64 va = start_va; va < end_va; va += PGSIZE)
-  {
-    pte_t *pte = walk(p->pagetable, va, 0);
-
-    // Not allocated
-    if (!pte || !(PTE_FLAGS(*pte) & PTE_V))
-      continue;
-
-    uint64 fileoff = vma->fileoff + (va - vma->addr);
-    uint64 pa = PTE2PA(*pte);
-
-    if (vma->flags & MAP_SHARED)
-    {
-      begin_op();
-      ilock(vma->file->ip);
-      writei(vma->file->ip, 0, pa, fileoff, PGSIZE);
-      iunlock(vma->file->ip);
-      end_op();
-    }
-
-    // unmap and free
-    uvmunmap(p->pagetable, va, 1, 1);
-  }
   return 0;
 }
 
