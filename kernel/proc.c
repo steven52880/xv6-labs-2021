@@ -208,6 +208,8 @@ proc_pagetable(struct proc *p)
 void
 proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
+  printf("freepagetable: ");
+  vmprint(pagetable);
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
@@ -305,6 +307,15 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // manage mapped pages
+  for (i = 0; i < VMA_AREA_CNT; i++)
+  {
+    np->vma[i] = p->vma[i];
+    if (np->vma[i].length != 0)
+      filedup(np->vma[i].file);
+  }
+  np->next_vma_addr = p->next_vma_addr;
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -347,6 +358,14 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  for (int i = 0; i < VMA_AREA_CNT; i++)
+  {
+    if (p->vma[i].length == 0)
+      continue;
+
+    munmap(p, p->vma[i].addr, p->vma[i].length);
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

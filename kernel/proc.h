@@ -84,7 +84,7 @@ struct vma {
   // addr ~ addr+length => file+offset ~ file+offset+length
   struct file *file;
   uint64 addr;
-  int offset;
+  int fileoff;
   int length;
 
   int prot;  // RWX permission

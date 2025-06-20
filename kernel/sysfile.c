@@ -523,7 +523,7 @@ sys_munmap(void)
     return -1;
   }
 
-  // Todo
+  struct proc *p = myproc();
 
-  return 0;
+  return munmap(p, addr, length);
 }
